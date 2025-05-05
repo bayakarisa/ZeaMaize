@@ -39,14 +39,23 @@ export function ImageUploader({ onImageUpload, onClearImage, disabled, currentPr
     }
   }, []);
 
+  // This function is called BOTH when a file is uploaded AND when an image is captured
+  const handleImageReady = useCallback((file: File, dataUrl: string) => {
+    stopCameraStream(); // Stop camera stream if it was running
+    onImageUpload(file, dataUrl);
+     // Switch back to upload tab to show the preview consistently after upload/capture
+    setActiveTab("upload");
+  }, [onImageUpload, stopCameraStream]);
+
+
   const handleFileChange = useCallback(
     (file: File | null) => {
       if (file && file.type.startsWith("image/")) {
-        stopCameraStream(); // Stop camera if a file is uploaded
         const reader = new FileReader();
         reader.onloadend = () => {
           const dataUrl = reader.result as string;
-          onImageUpload(file, dataUrl);
+          // Use handleImageReady for consistent handling
+          handleImageReady(file, dataUrl);
         };
         reader.readAsDataURL(file);
       } else if (file) {
@@ -60,8 +69,9 @@ export function ImageUploader({ onImageUpload, onClearImage, disabled, currentPr
          onClearImage(); // Clear if no file selected
       }
     },
-    [onImageUpload, onClearImage, stopCameraStream, toast]
+    [handleImageReady, onClearImage, toast] // Use handleImageReady
   );
+
 
   const handleInputChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -100,80 +110,156 @@ export function ImageUploader({ onImageUpload, onClearImage, disabled, currentPr
     onClearImage();
     const input = document.getElementById('file-upload') as HTMLInputElement;
     if (input) input.value = '';
-  }, [onClearImage, stopCameraStream]);
+     // Ensure camera state is reset if clearing from capture tab preview
+    if (activeTab === 'capture') {
+       setHasCameraPermission(null); // Allow re-requesting permission
+    }
+  }, [onClearImage, stopCameraStream, activeTab]);
 
 
    const requestCameraPermission = useCallback(async () => {
-    if (hasCameraPermission) { // If permission already granted, just ensure stream is active
-       if (!isCapturing && videoRef.current) {
-          try {
-             const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-             streamRef.current = stream;
-             videoRef.current.srcObject = stream;
-             setIsCapturing(true);
-          } catch (error) {
-             console.error('Error accessing camera:', error);
-             setHasCameraPermission(false);
-             toast({ variant: 'destructive', title: 'Camera Error', description: 'Could not restart camera stream.' });
-          }
-       }
-       return;
-    }
+    // Reset permission state to force re-check/re-request
+    setHasCameraPermission(null);
+    setIsCapturing(false); // Ensure capturing is false initially
+
+    // Ensure videoRef.current exists before proceeding
+     if (!videoRef.current) {
+        console.error("Video element ref not available");
+        toast({ variant: 'destructive', title: 'Internal Error', description: 'Cannot access video element.' });
+        return;
+     }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
       setHasCameraPermission(true);
-      if (videoRef.current) {
+      if (videoRef.current) { // Check ref again just before using
         videoRef.current.srcObject = stream;
+         // Ensure autoplay works, especially on mobile
+         await videoRef.current.play().catch(err => {
+            console.warn("Video play failed:", err);
+             // Maybe show a UI element asking user to tap to play if autoplay fails
+         });
         setIsCapturing(true); // Start capturing
       }
     } catch (error) {
       console.error('Error accessing camera:', error);
       setHasCameraPermission(false);
       setIsCapturing(false);
+      // Provide more specific error feedback if possible
+      let description = 'Please enable camera permissions in your browser settings.';
+      if (error instanceof Error) {
+          if (error.name === 'NotAllowedError') {
+             description = 'Camera access was denied. Please allow access in your browser settings.';
+          } else if (error.name === 'NotFoundError') {
+             description = 'No camera found. Please ensure a camera is connected and enabled.';
+          } else {
+             description = `An unexpected error occurred: ${error.message}`;
+          }
+       }
       toast({
         variant: 'destructive',
-        title: 'Camera Access Denied',
-        description: 'Please enable camera permissions in your browser settings.',
+        title: 'Camera Access Failed',
+        description: description,
       });
     }
-  }, [hasCameraPermission, isCapturing, toast]); // Add isCapturing
+  }, [toast]); // Dependencies: toast
 
-  // Effect to request permission when capture tab is activated
+
+   // Effect to request permission when capture tab is activated
   useEffect(() => {
-    if (activeTab === 'capture') {
-      requestCameraPermission();
-    } else {
-      stopCameraStream(); // Stop camera when switching away
+    // Only request permission if the tab is 'capture' AND permission is not already granted/denied
+    if (activeTab === 'capture' && hasCameraPermission === null) {
+       // Ensure video element is ready before requesting
+        const checkVideoElement = () => {
+            if (videoRef.current) {
+                requestCameraPermission();
+            } else {
+                setTimeout(checkVideoElement, 100); // Retry after a short delay
+            }
+        };
+        checkVideoElement();
+    } else if (activeTab !== 'capture') {
+       stopCameraStream(); // Stop camera when switching away from capture tab
     }
-    // Cleanup function to stop camera when component unmounts or tab changes
-     return () => {
-        stopCameraStream();
+
+    // Cleanup function: Stop stream when component unmounts or tab changes *away* from capture
+    return () => {
+       if (activeTab === 'capture') { // Stop only if currently on capture tab when cleanup runs
+         stopCameraStream();
+       }
     };
-  }, [activeTab, requestCameraPermission, stopCameraStream]);
+     // Re-run if activeTab changes OR if permission state becomes null (e.g., after clearing)
+  }, [activeTab, hasCameraPermission, requestCameraPermission, stopCameraStream]);
 
 
    const handleCapture = useCallback(() => {
-      if (!videoRef.current || !canvasRef.current || !isCapturing) return;
+      // Ensure all refs and states are valid
+      if (!videoRef.current || !canvasRef.current || !isCapturing || !streamRef.current) {
+        console.warn("Capture failed: Video, canvas, stream, or capturing state invalid.");
+        return;
+      }
 
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+
+       // Set canvas dimensions based on the video stream's actual dimensions
+      const track = streamRef.current.getVideoTracks()[0];
+      const settings = track?.getSettings();
+      const videoWidth = settings?.width || video.videoWidth;
+      const videoHeight = settings?.height || video.videoHeight;
+
+      if (!videoWidth || !videoHeight) {
+         console.error("Capture failed: Could not get video dimensions.");
+         toast({ variant: 'destructive', title: 'Capture Error', description: 'Could not determine video size.' });
+         return;
+      }
+
+
+      canvas.width = videoWidth;
+      canvas.height = videoHeight;
+
       const context = canvas.getContext('2d');
       if (context) {
-         context.drawImage(video, 0, 0, canvas.width, canvas.height);
-         canvas.toBlob(blob => {
-            if (blob) {
-              const file = new File([blob], `capture-${Date.now()}.png`, { type: 'image/png' });
-              const dataUrl = canvas.toDataURL('image/png');
-              onImageUpload(file, dataUrl);
-              stopCameraStream(); // Stop camera after capture
-            }
-         }, 'image/png');
+         try {
+             // Draw the current video frame onto the canvas
+             context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+             // Get the image data URL from the canvas
+             const dataUrl = canvas.toDataURL('image/png');
+
+             // Convert canvas content to a Blob, then to a File
+             canvas.toBlob(blob => {
+                 if (blob) {
+                   const file = new File([blob], `capture-${Date.now()}.png`, { type: 'image/png' });
+                   // Use handleImageReady for consistent processing
+                   handleImageReady(file, dataUrl);
+                    // Optionally stop the stream *after* successful capture and processing
+                    // stopCameraStream(); // Keep stream running if user might want to retake immediately
+                 } else {
+                    console.error("Capture failed: Could not create blob from canvas.");
+                    toast({ variant: 'destructive', title: 'Capture Error', description: 'Failed to process captured image.' });
+                 }
+             }, 'image/png');
+
+          } catch (error) {
+             console.error("Error during canvas drawing or data URL generation:", error);
+             toast({ variant: 'destructive', title: 'Capture Error', description: 'Could not capture image from video.' });
+          }
+      } else {
+         console.error("Capture failed: Could not get 2D context from canvas.");
+         toast({ variant: 'destructive', title: 'Capture Error', description: 'Failed to initialize drawing context.' });
       }
-    }, [isCapturing, onImageUpload, stopCameraStream]);
+    }, [isCapturing, handleImageReady, toast]); // Dependencies
+
+
+   // Function to handle retake: Clear preview, reset state, request permission again
+   const handleRetake = useCallback(() => {
+       clearPreviewAndStopCamera();
+       // Resetting hasCameraPermission to null triggers the useEffect to request again
+       setHasCameraPermission(null);
+       setActiveTab("capture"); // Ensure capture tab is active
+   }, [clearPreviewAndStopCamera]);
 
 
   return (
@@ -188,126 +274,141 @@ export function ImageUploader({ onImageUpload, onClearImage, disabled, currentPr
           </TabsTrigger>
         </TabsList>
 
-        {/* Upload Tab */}
+        {/* Upload Tab Content */}
         <TabsContent value="upload">
-          <label
-            htmlFor="file-upload"
+          <div
             className={cn(
-              "relative mt-2 flex flex-col items-center justify-center w-full h-64 border-2 border-dashed rounded-lg cursor-pointer transition-colors duration-200 ease-in-out",
-              dragOver ? "border-primary bg-accent/20" : "border-border hover:border-primary/50 hover:bg-accent/10",
-              disabled ? "cursor-not-allowed bg-muted/50 border-muted" : "",
-              currentPreviewUrl && activeTab === 'upload' ? "border-solid" : "" // Show solid border only if preview exists and on upload tab
+              "relative mt-2 flex flex-col items-center justify-center w-full h-64 border-2 border-dashed rounded-lg transition-colors duration-200 ease-in-out",
+               // DragnDrop / Hover styles only apply when no preview URL exists
+              !currentPreviewUrl && (dragOver ? "border-primary bg-accent/20" : "border-border hover:border-primary/50 hover:bg-accent/10"),
+              disabled ? "cursor-not-allowed bg-muted/50 border-muted" : (!currentPreviewUrl ? "cursor-pointer" : ""), // Pointer only if no preview
+               // Solid border when there IS a preview
+              currentPreviewUrl ? "border-solid border-border" : ""
             )}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
+             // Drag and Drop handlers only active when no preview
+            onDragOver={!currentPreviewUrl ? handleDragOver : undefined}
+            onDragLeave={!currentPreviewUrl ? handleDragLeave : undefined}
+            onDrop={!currentPreviewUrl ? handleDrop : undefined}
           >
-            {currentPreviewUrl ? (
-              <>
-                <Image
-                  src={currentPreviewUrl}
-                  alt="Preview"
-                  layout="fill"
-                  objectFit="contain"
-                  className="rounded-lg p-2"
-                />
-                <Button
-                    variant="destructive"
-                    size="icon"
-                    className="absolute top-2 right-2 z-10 h-7 w-7"
-                    onClick={(e) => { e.preventDefault(); clearPreviewAndStopCamera(); }}
-                    disabled={disabled}
-                    aria-label="Remove image"
-                  >
-                    <X className="h-4 w-4" />
-                </Button>
-              </>
-            ) : (
-              <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center">
-                <UploadCloud className={cn("w-10 h-10 mb-3", dragOver ? "text-primary" : "text-muted-foreground")} />
-                <p className={cn("mb-2 text-sm", dragOver ? "text-primary" : "text-muted-foreground")}>
-                  <span className="font-semibold">Click to upload</span> or drag and drop
-                </p>
-                <p className={cn("text-xs", dragOver ? "text-primary" : "text-muted-foreground")}>
-                  PNG, JPG, GIF up to 10MB
-                </p>
-              </div>
-            )}
+             <label htmlFor="file-upload" className={cn("absolute inset-0 flex flex-col items-center justify-center", !currentPreviewUrl ? "cursor-pointer" : "cursor-default")}>
+                {currentPreviewUrl ? (
+                  <>
+                    <Image
+                      src={currentPreviewUrl}
+                      alt="Preview"
+                      layout="fill"
+                      objectFit="contain"
+                      className="rounded-lg p-2"
+                    />
+                     {/* Clear button positioned over the image */}
+                    <Button
+                        variant="destructive"
+                        size="icon"
+                        className="absolute top-2 right-2 z-10 h-7 w-7"
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); clearPreviewAndStopCamera(); }}
+                        disabled={disabled}
+                        aria-label="Remove image"
+                      >
+                        <X className="h-4 w-4" />
+                    </Button>
+                     {/* Retake button - useful if captured image landed here */}
+                     <Button
+                       variant="secondary"
+                       size="icon"
+                       className="absolute top-2 left-2 z-10 h-7 w-7"
+                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleRetake(); }}
+                       disabled={disabled}
+                       aria-label="Retake picture"
+                     >
+                       <RefreshCw className="h-4 w-4" />
+                     </Button>
+                  </>
+                ) : (
+                  // Upload prompt shown only when no preview
+                  <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center">
+                    <UploadCloud className={cn("w-10 h-10 mb-3", dragOver ? "text-primary" : "text-muted-foreground")} />
+                    <p className={cn("mb-2 text-sm", dragOver ? "text-primary" : "text-muted-foreground")}>
+                      <span className="font-semibold">Click to upload</span> or drag and drop
+                    </p>
+                    <p className={cn("text-xs", dragOver ? "text-primary" : "text-muted-foreground")}>
+                      PNG, JPG, GIF up to 10MB
+                    </p>
+                  </div>
+                )}
+             </label>
             <input
               id="file-upload"
               type="file"
               className="hidden"
               accept="image/*"
               onChange={handleInputChange}
-              disabled={disabled}
+              disabled={disabled || !!currentPreviewUrl} // Disable if there's a preview
             />
-          </label>
-        </TabsContent>
-
-        {/* Capture Tab */}
-        <TabsContent value="capture">
-          <div className="relative mt-2 w-full h-64 border border-border rounded-lg overflow-hidden bg-muted flex items-center justify-center">
-            {currentPreviewUrl ? (
-                 <>
-                    <Image
-                      src={currentPreviewUrl}
-                      alt="Captured image"
-                      layout="fill"
-                      objectFit="contain"
-                      className="rounded-lg p-1"
-                     />
-                     <Button
-                       variant="destructive"
-                       size="icon"
-                       className="absolute top-2 right-2 z-10 h-7 w-7"
-                       onClick={(e) => { e.preventDefault(); clearPreviewAndStopCamera(); }}
-                       disabled={disabled}
-                       aria-label="Remove image"
-                     >
-                       <X className="h-4 w-4" />
-                     </Button>
-                     {/* Add retake button */}
-                      <Button
-                       variant="secondary"
-                       size="icon"
-                       className="absolute top-2 left-2 z-10 h-7 w-7"
-                       onClick={(e) => { e.preventDefault(); clearPreviewAndStopCamera(); requestCameraPermission(); }} // Clear and request again
-                       disabled={disabled || !hasCameraPermission} // Disable if no permission
-                       aria-label="Retake picture"
-                     >
-                       <RefreshCw className="h-4 w-4" />
-                     </Button>
-                 </>
-             ) : isCapturing ? (
-               <>
-                 <video ref={videoRef} className="w-full h-full object-cover" autoPlay muted playsInline />
-                 <Button
-                   size="lg"
-                   className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-10"
-                   onClick={handleCapture}
-                   disabled={disabled || !hasCameraPermission}
-                 >
-                   <Camera className="mr-2 h-5 w-5" /> Capture
-                 </Button>
-               </>
-             ) : (
-               <div className="text-center p-4">
-                  {hasCameraPermission === false && (
-                       <Alert variant="destructive" className="mb-4">
-                         <AlertTitle>Camera Access Required</AlertTitle>
-                         <AlertDescription>
-                           Allow camera access to capture an image. You might need to refresh the page or check browser settings.
-                         </AlertDescription>
-                       </Alert>
-                     )}
-                  <Button onClick={requestCameraPermission} disabled={disabled || hasCameraPermission === true}>
-                    <Camera className="mr-2 h-4 w-4" /> Enable Camera
-                  </Button>
-               </div>
-            )}
-             <canvas ref={canvasRef} className="hidden" /> {/* Hidden canvas for capturing frame */}
           </div>
         </TabsContent>
+
+        {/* Capture Tab Content */}
+        <TabsContent value="capture">
+           <div className="relative mt-2 w-full h-64 border border-border rounded-lg overflow-hidden bg-muted flex items-center justify-center">
+              {/* Video Element - Always render to attach ref, hide if not needed */}
+               <video
+                 ref={videoRef}
+                 className={cn(
+                   "absolute inset-0 w-full h-full object-cover",
+                   isCapturing ? "block" : "hidden" // Show only when capturing
+                 )}
+                 autoPlay
+                 muted
+                 playsInline // Important for mobile
+               />
+
+             {/* Loading/Permission State */}
+             {!isCapturing && hasCameraPermission === null && (
+               <p className="text-muted-foreground">Initializing camera...</p>
+             )}
+
+             {/* Permission Denied State */}
+             {!isCapturing && hasCameraPermission === false && (
+               <div className="text-center p-4">
+                 <Alert variant="destructive" className="mb-4">
+                   <AlertTitle>Camera Access Required</AlertTitle>
+                   <AlertDescription>
+                     Allow camera access in browser settings to capture an image. You may need to refresh.
+                   </AlertDescription>
+                 </Alert>
+                 <Button onClick={requestCameraPermission} disabled={disabled}>
+                   <RefreshCw className="mr-2 h-4 w-4" /> Retry Camera Access
+                 </Button>
+               </div>
+             )}
+
+             {/* Initial State - Ready to Enable */}
+             {!isCapturing && hasCameraPermission === null && ( // Show enable button only before first attempt
+                <div className="text-center p-4">
+                  <Button onClick={requestCameraPermission} disabled={disabled}>
+                    <Camera className="mr-2 h-4 w-4" /> Enable Camera
+                  </Button>
+                </div>
+              )}
+
+
+              {/* Capturing State - Show Capture Button */}
+              {isCapturing && (
+                <Button
+                  size="lg"
+                  className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-10"
+                  onClick={handleCapture}
+                  disabled={disabled || !hasCameraPermission}
+                >
+                  <Camera className="mr-2 h-5 w-5" /> Capture
+                </Button>
+              )}
+
+              {/* Hidden Canvas for Frame Capture */}
+              <canvas ref={canvasRef} className="hidden" />
+           </div>
+         </TabsContent>
+
       </Tabs>
     </div>
   );

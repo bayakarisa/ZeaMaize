@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { useToast } from "@/hooks/use-toast";
 import { summarizeDiseaseInfo } from '@/ai/flows/summarize-disease-info';
 import { generateTreatmentRecommendations } from '@/ai/flows/generate-treatment-recommendations';
+import { Toaster } from "@/components/ui/toaster"; // Import Toaster
 
 // Mock function (keep as is)
 const mockPredictDisease = async (file: File): Promise<{ diseaseName: string; confidenceScore: number; rawDescription: string }> => {
@@ -103,14 +104,22 @@ const Home: FC = () => {
   }, [toast]); // Added toast to dependency array
 
   const handleAnalyzeClick = useCallback(async () => {
-    if (!selectedFile || !previewUrl) { // Also check for previewUrl
-      toast({
-        title: "No Image Selected",
-        description: "Please upload or capture an image first.",
-        variant: "destructive",
-      });
-      return;
+    // Determine if we should use selectedFile or potentially data from a capture (which sets previewUrl directly)
+    const fileToAnalyze = selectedFile;
+    const sourceUrl = previewUrl;
+
+    if (!fileToAnalyze && !sourceUrl) { // Check if neither file nor capture source is available
+        toast({
+            title: "No Image Selected",
+            description: "Please upload or capture an image first.",
+            variant: "destructive",
+        });
+        return;
     }
+    // If there's no file but there is a previewUrl (from camera capture), create a dummy file for the mock function
+    // In a real scenario, you might handle the captured blob/dataURL directly if the backend supports it.
+    const effectiveFile = fileToAnalyze || new File(["capture"], "capture.png", { type: "image/png" });
+
 
     setIsLoading(true);
     setError(null);
@@ -119,7 +128,8 @@ const Home: FC = () => {
     let currentResult: DiagnosisResult | null = null;
 
     try {
-      const prediction = await mockPredictDisease(selectedFile);
+       // Use the effectiveFile (either uploaded or dummy capture file)
+      const prediction = await mockPredictDisease(effectiveFile);
 
       if (prediction.diseaseName === "Uncertain Diagnosis") {
           currentResult = {
@@ -152,14 +162,20 @@ const Home: FC = () => {
 
       setDiagnosisResult(currentResult);
 
-      // Save to history
-      const historyEntry: HistoryEntry = {
-        id: Date.now().toString(), // Simple unique ID
-        timestamp: new Date().toISOString(),
-        thumbnailUrl: previewUrl, // Save the preview URL used for analysis
-        result: currentResult,
-      };
-      saveHistory(historyEntry);
+      // Save to history using the sourceUrl (which is always set)
+       if (sourceUrl) {
+         const historyEntry: HistoryEntry = {
+           id: Date.now().toString(), // Simple unique ID
+           timestamp: new Date().toISOString(),
+           thumbnailUrl: sourceUrl, // Save the preview URL used for analysis
+           result: currentResult,
+         };
+         saveHistory(historyEntry);
+       } else {
+           console.warn("Could not save history: previewUrl is missing.");
+           // Optionally notify user if saving history failed due to missing URL
+       }
+
 
     } catch (err) {
        console.error("Analysis failed:", err);
@@ -173,7 +189,9 @@ const Home: FC = () => {
     } finally {
       setIsLoading(false);
     }
+     // Pass sourceUrl (previewUrl) to the callback
   }, [selectedFile, previewUrl, toast, saveHistory]);
+
 
   const handleSelectHistory = useCallback((entry: HistoryEntry) => {
     // Set the selected history item's result as the current diagnosis
@@ -238,7 +256,7 @@ const Home: FC = () => {
                  <CardFooter className="flex justify-center">
                    <Button
                      onClick={handleAnalyzeClick}
-                     disabled={!selectedFile || isLoading}
+                     disabled={(!selectedFile && !previewUrl) || isLoading} // Disable if no file AND no previewUrl
                      size="lg"
                      className="w-full md:w-auto bg-primary hover:bg-primary/90 text-primary-foreground"
                    >
@@ -265,7 +283,8 @@ const Home: FC = () => {
            </div>
        </div>
 
-      {/* Toaster remains at the root */}
+      {/* Ensure Toaster is included for notifications */}
+      <Toaster />
     </div>
   );
 };

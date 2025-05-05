@@ -2,7 +2,7 @@
 import type {Metadata} from 'next';
 import { Geist, Geist_Mono } from 'next/font/google'; // Corrected import for Geist_Mono
 import './globals.css';
-// Removed Toaster import as it's in page.tsx now
+import { Toaster } from "@/components/ui/toaster"; // Import Toaster
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -28,7 +28,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         {children}
-        {/* Toaster removed from here */}
+        <Toaster /> {/* Add Toaster here */}
       </body>
     </html>
   );
