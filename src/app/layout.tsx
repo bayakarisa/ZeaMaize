@@ -1,22 +1,22 @@
 
 import type {Metadata} from 'next';
-import {Geist, Geist_Mono} from 'next/font/google';
+import { Geist, Geist_Mono } from 'next/font/google'; // Corrected import for Geist_Mono
 import './globals.css';
-import { Toaster } from "@/components/ui/toaster"; // Import Toaster
+// Removed Toaster import as it's in page.tsx now
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
   subsets: ['latin'],
 });
 
-const geistMono = Geist_Mono({
+const geistMono = Geist_Mono({ // Corrected usage
   variable: '--font-geist-mono',
   subsets: ['latin'],
 });
 
 export const metadata: Metadata = {
   title: 'LeafWise - Maize Disease Detection',
-  description: 'Upload maize leaf images to detect diseases using AI.',
+  description: 'Upload or capture maize leaf images to detect diseases using AI.', // Updated description
 };
 
 export default function RootLayout({
@@ -28,7 +28,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         {children}
-        <Toaster /> {/* Add Toaster here */}
+        {/* Toaster removed from here */}
       </body>
     </html>
   );
